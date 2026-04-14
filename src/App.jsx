@@ -9,46 +9,62 @@ import { getAuth, onAuthStateChanged, signInWithCustomToken, signInAnonymously }
 import { getFirestore, doc, setDoc, getDoc, collection, onSnapshot, updateDoc, deleteDoc, increment, addDoc } from 'firebase/firestore';
 
 // --- Production Configuration ---
-// Refined helper to safely access environment variables without breaking ES2015 targets
-const getFirebaseConfig = () => {
-  // 1. Safe check for Vite/Netlify Environment Variables
+// Helper to safely check environment variables across different build targets
+const getEnvVar = (key) => {
   try {
-    if (typeof import.meta !== 'undefined' && import.meta.env?.VITE_FIREBASE_CONFIG) {
-      return JSON.parse(import.meta.env.VITE_FIREBASE_CONFIG);
+    // This is the standard Vite way to access variables
+    // We check typeof to prevent crashes in environments where import.meta isn't defined
+    if (typeof import.meta !== 'undefined' && import.meta.env) {
+      return import.meta.env[key];
     }
   } catch (e) {
-    // Fallback if import.meta is restricted or undefined
+    // Silence errors in environments that don't support import.meta
+  }
+  return null;
+};
+
+const getFirebaseConfig = () => {
+  const envConfig = getEnvVar('VITE_FIREBASE_CONFIG');
+  
+  if (envConfig) {
+    try {
+      if (typeof envConfig === 'object') return envConfig;
+      return JSON.parse(envConfig);
+    } catch (e) {
+      console.error("VITE_FIREBASE_CONFIG found but failed to parse. Check your JSON format in Netlify.");
+    }
   }
 
-  // 2. Fallback for internal previewer tool
+  // Fallback for internal previewer tool
   if (typeof __firebase_config !== 'undefined' && __firebase_config) {
-    return JSON.parse(__firebase_config);
+    try {
+      return JSON.parse(__firebase_config);
+    } catch (e) {
+      return null;
+    }
   }
   return null; 
 };
 
 const getAppId = () => {
-  try {
-    if (typeof import.meta !== 'undefined' && import.meta.env?.VITE_APP_ID) {
-      return import.meta.env.VITE_APP_ID;
-    }
-  } catch (e) {
-    // Fallback if import.meta is restricted
-  }
-  
-  if (typeof __app_id !== 'undefined') return __app_id;
-  return 'community-hub-default';
+  const envAppId = getEnvVar('VITE_APP_ID');
+  if (envAppId) return envAppId;
+  return (typeof __app_id !== 'undefined' ? __app_id : 'o9-community-hub-prod');
 };
 
 const firebaseConfig = getFirebaseConfig();
 const appId = getAppId();
 
-// Initialize Firebase only if config exists to prevent blank-page crashes
+// Initialize Firebase only if config exists
 let app, auth, db;
 if (firebaseConfig) {
-  app = initializeApp(firebaseConfig);
-  auth = getAuth(app);
-  db = getFirestore(app);
+  try {
+    app = initializeApp(firebaseConfig);
+    auth = getAuth(app);
+    db = getFirestore(app);
+  } catch (err) {
+    console.error("Firebase initialization failed:", err);
+  }
 }
 
 // --- Constants ---
@@ -136,7 +152,7 @@ const SignupPage = ({ user }) => {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (!user) return;
+    if (!user || !db) return;
     setLoading(true);
     try {
       const userDoc = doc(db, 'artifacts', appId, 'users', user.uid, 'profile', 'info');
@@ -179,6 +195,7 @@ const SchedulePage = ({ events, sandbox }) => {
   const [form, setForm] = useState({ title: '', date: '', time: '', location: 'Global Online Session', description: '' });
 
   const addEvent = async () => {
+    if (!db) return;
     try {
       await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'events'), form);
       setShowAdd(false);
@@ -187,8 +204,8 @@ const SchedulePage = ({ events, sandbox }) => {
 
   return (
     <div className="max-w-5xl mx-auto py-20 px-6">
-      <div className="flex flex-col md:flex-row md:items-end justify-between gap-6 mb-12">
-        <div className="text-left">
+      <div className="flex flex-col md:flex-row md:items-end justify-between gap-6 mb-12 text-left">
+        <div>
           <h2 className="text-4xl font-black text-white uppercase mb-2 tracking-tighter">Sync Schedule</h2>
           <p className="text-slate-400">Meetings held on the <strong>second Wednesday</strong> of every month at 10 AM EST.</p>
         </div>
@@ -200,7 +217,7 @@ const SchedulePage = ({ events, sandbox }) => {
       </div>
 
       {showAdd && (
-        <div className="mb-10 p-8 bg-white/5 border border-cyan-500/30 rounded-3xl space-y-4 text-left animate-in fade-in slide-in-from-top-4">
+        <div className="mb-10 p-8 bg-white/5 border border-cyan-500/30 rounded-3xl space-y-4 text-left animate-in fade-in">
           <input className="w-full bg-black/50 p-3 border border-white/10 rounded-xl text-white outline-none" placeholder="Title" onChange={e => setForm({...form, title: e.target.value})} />
           <textarea className="w-full bg-black/50 p-3 border border-white/10 rounded-xl text-white outline-none" placeholder="Description" onChange={e => setForm({...form, description: e.target.value})} />
           <div className="flex gap-4">
@@ -215,7 +232,7 @@ const SchedulePage = ({ events, sandbox }) => {
         {events.map(event => (
           <div key={event.id} className="bg-white/5 border border-white/10 p-8 rounded-[2rem] flex flex-col md:flex-row md:items-center justify-between hover:bg-white/10 transition-all group">
             <div className="flex items-center gap-8 text-left">
-              <div className="bg-cyan-500 text-black p-4 rounded-2xl min-w-[100px] text-center shadow-[0_0_15px_rgba(6,182,212,0.2)]">
+              <div className="bg-cyan-500 text-black p-4 rounded-2xl min-w-[100px] text-center">
                 <div className="text-[10px] font-black uppercase opacity-60 mb-1">{new Date(event.date || Date.now()).toLocaleString('default', { month: 'short' })}</div>
                 <div className="text-3xl font-black leading-none">{new Date(event.date || Date.now()).getDate()}</div>
               </div>
@@ -241,11 +258,12 @@ const VotingPage = ({ user, ideas, sandbox }) => {
   const [form, setForm] = useState({ title: '', description: '', solutionArea: SOLUTION_AREAS[0], count: 0 });
 
   const handleVote = async (id) => {
-    if (!user) return;
+    if (!user || !db) return;
     try { await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'votes', id), { count: increment(1) }); } catch (err) { console.error(err); }
   };
 
   const addIdea = async () => {
+    if (!db) return;
     try {
       await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'votes'), {
         ...form,
@@ -261,8 +279,8 @@ const VotingPage = ({ user, ideas, sandbox }) => {
 
   return (
     <div className="max-w-7xl mx-auto py-20 px-6">
-      <div className="flex flex-col md:flex-row md:items-end justify-between mb-12">
-        <div className="text-left">
+      <div className="flex flex-col md:flex-row md:items-end justify-between mb-12 text-left">
+        <div>
           <h2 className="text-4xl font-black text-white uppercase mb-2 tracking-tighter">Roadmap Innovation</h2>
           <p className="text-slate-400">Crowdsourcing the next generation of Digital Brain capabilities.</p>
         </div>
@@ -274,7 +292,7 @@ const VotingPage = ({ user, ideas, sandbox }) => {
       </div>
 
       {showAdd && (
-        <div className="mb-10 p-8 bg-white/5 border border-cyan-500/30 rounded-3xl space-y-4 text-left animate-in fade-in slide-in-from-top-4">
+        <div className="mb-10 p-8 bg-white/5 border border-cyan-500/30 rounded-3xl space-y-4 text-left animate-in fade-in">
           <input className="w-full bg-black/50 p-3 border border-white/10 rounded-xl text-white outline-none" placeholder="Idea Title" onChange={e => setForm({...form, title: e.target.value})} />
           <textarea className="w-full bg-black/50 p-3 border border-white/10 rounded-xl text-white outline-none" placeholder="Description" onChange={e => setForm({...form, description: e.target.value})} />
           <select className="w-full bg-black/50 p-3 border border-white/10 rounded-xl text-white outline-none" onChange={e => setForm({...form, solutionArea: e.target.value})}>
@@ -325,8 +343,8 @@ const VotingPage = ({ user, ideas, sandbox }) => {
 };
 
 const MembersPage = () => (
-  <div className="max-w-7xl mx-auto py-20 px-6">
-    <div className="flex flex-col md:flex-row md:items-end justify-between mb-12 gap-6 text-left">
+  <div className="max-w-7xl mx-auto py-20 px-6 text-left">
+    <div className="flex flex-col md:flex-row md:items-end justify-between mb-12 gap-6">
       <div>
         <h2 className="text-4xl font-black text-white uppercase mb-2 tracking-tighter">Expert Network</h2>
         <p className="text-slate-400">Connecting planners from across the global ecosystem.</p>
@@ -358,6 +376,7 @@ const LinksPage = ({ resources, sandbox }) => {
   const [form, setForm] = useState({ title: '', description: '', area: SOLUTION_AREAS[0], type: 'PDF' });
 
   const addResource = async () => {
+    if (!db) return;
     try {
       await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'resources'), form);
       setShowAdd(false);
@@ -367,8 +386,8 @@ const LinksPage = ({ resources, sandbox }) => {
   const filtered = filter === 'All' ? resources : resources.filter(r => r.area === filter);
 
   return (
-    <div className="max-w-7xl mx-auto py-20 px-6">
-      <div className="flex flex-col md:flex-row md:items-end justify-between mb-12 gap-6 text-left">
+    <div className="max-w-7xl mx-auto py-20 px-6 text-left">
+      <div className="flex flex-col md:flex-row md:items-end justify-between mb-12 gap-6">
         <div>
           <h2 className="text-4xl font-black text-white uppercase mb-2 tracking-tighter">Technical Assets</h2>
           <p className="text-slate-400">Passive knowledge center for guides and roadmaps.</p>
@@ -381,7 +400,7 @@ const LinksPage = ({ resources, sandbox }) => {
       </div>
 
       {showAdd && (
-        <div className="mb-10 p-8 bg-white/5 border border-cyan-500/30 rounded-3xl space-y-4 text-left animate-in fade-in slide-in-from-top-4">
+        <div className="mb-10 p-8 bg-white/5 border border-cyan-500/30 rounded-3xl space-y-4 animate-in fade-in">
           <input className="w-full bg-black/50 p-3 border border-white/10 rounded-xl text-white outline-none" placeholder="Title" onChange={e => setForm({...form, title: e.target.value})} />
           <textarea className="w-full bg-black/50 p-3 border border-white/10 rounded-xl text-white outline-none" placeholder="Description" onChange={e => setForm({...form, description: e.target.value})} />
           <div className="flex gap-4">
@@ -393,7 +412,7 @@ const LinksPage = ({ resources, sandbox }) => {
       )}
       
       <div className="grid grid-cols-1 lg:grid-cols-[280px_1fr] gap-12">
-        <div className="space-y-3 text-left">
+        <div className="space-y-3">
           <h3 className="text-[10px] font-black uppercase text-slate-600 tracking-widest mb-6">Expertise Nodes</h3>
           {['All', ...SOLUTION_AREAS].map(area => (
             <button key={area} onClick={() => setFilter(area)} className={`w-full text-left px-5 py-3 rounded-xl text-xs font-black uppercase tracking-widest transition-all ${filter === area ? 'text-cyan-400 bg-cyan-500/10 border border-cyan-500/20' : 'text-slate-500 border border-transparent hover:bg-white/5'}`}>{area}</button>
@@ -401,7 +420,7 @@ const LinksPage = ({ resources, sandbox }) => {
         </div>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
           {filtered.map(res => (
-            <div key={res.id} className="bg-white/5 border border-white/10 rounded-[2.5rem] p-8 hover:bg-white/10 transition-all text-left">
+            <div key={res.id} className="bg-white/5 border border-white/10 rounded-[2.5rem] p-8 hover:bg-white/10 transition-all">
               <div className="bg-cyan-500/10 p-3 rounded-2xl text-cyan-400 border border-cyan-500/20 w-max mb-6">
                 {res.type === 'Video' ? <Video size={24} /> : <FileText size={24} />}
               </div>
@@ -428,15 +447,15 @@ export default function App() {
   const [sandboxMode, setSandboxMode] = useState(false);
 
   useEffect(() => {
+    if (!auth) return;
     const initAuth = async () => {
-      if (!auth) return; // Guard for missing config
       try {
         if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) await signInWithCustomToken(auth, __initial_auth_token);
         else await signInAnonymously(auth);
       } catch (err) { console.error("Auth init failed:", err); }
     };
     initAuth();
-    const unsubscribe = auth ? onAuthStateChanged(auth, setUser) : () => {};
+    const unsubscribe = onAuthStateChanged(auth, setUser);
     return () => unsubscribe();
   }, []);
 
@@ -469,13 +488,13 @@ export default function App() {
 
   const renderPage = () => {
     switch (currentPage) {
-      case 'landing': return <LandingPage onNavigate={setCurrentPage} user={user} />;
+      case 'landing': return <LandingPage onNavigate={setCurrentPage} />;
       case 'signup': return <SignupPage user={user} />;
       case 'events': return <SchedulePage events={events} sandbox={sandboxMode} />;
       case 'voting': return <VotingPage user={user} ideas={ideas} sandbox={sandboxMode} />;
       case 'members': return <MembersPage />;
       case 'links': return <LinksPage resources={resources} sandbox={sandboxMode} />;
-      default: return <LandingPage onNavigate={setCurrentPage} user={user} />;
+      default: return <LandingPage onNavigate={setCurrentPage} />;
     }
   };
 
@@ -493,8 +512,8 @@ export default function App() {
     return (
       <div className="min-h-screen bg-[#020617] text-white flex flex-col items-center justify-center p-10 text-center">
         <Database size={64} className="text-red-400 mb-6" />
-        <h1 className="text-3xl font-black mb-4">Configuration Missing</h1>
-        <p className="text-slate-400 max-w-md">The platform cannot reach the Digital Brain. Please ensure <strong>VITE_FIREBASE_CONFIG</strong> is set in your Netlify Environment Variables.</p>
+        <h1 className="text-3xl font-black mb-4 uppercase">Configuration Required</h1>
+        <p className="text-slate-400 max-w-md">Connect your <strong>Digital Brain</strong> by adding your Firebase credentials to Netlify.</p>
       </div>
     );
   }
@@ -503,7 +522,7 @@ export default function App() {
     <div className="min-h-screen bg-[#020617] text-slate-100 font-sans selection:bg-cyan-500/30 selection:text-cyan-400">
       <nav className="sticky top-0 z-50 bg-black/50 backdrop-blur-xl border-b border-white/5 h-24 flex items-center px-6">
         <div className="max-w-7xl mx-auto w-full flex items-center justify-between">
-          <div onClick={() => setCurrentPage('landing')} className="flex items-center gap-4 cursor-pointer group transition-all text-left">
+          <div onClick={() => setCurrentPage('landing')} className="flex items-center gap-4 cursor-pointer group text-left">
             <div className="w-12 h-12 bg-white flex items-center justify-center text-black font-black text-2xl rounded-2xl group-hover:bg-cyan-500 transition-colors">o9</div>
             <div className="flex flex-col leading-none">
               <span className="text-2xl font-black text-white tracking-tighter leading-none">SOLUTIONS</span>
@@ -519,14 +538,14 @@ export default function App() {
       </nav>
 
       <main className="relative z-10 min-h-[80vh]">
-        {!user ? <div className="h-[80vh] flex flex-col items-center justify-center text-cyan-500 animate-pulse uppercase tracking-[0.5em] font-black"><Cpu size={48} className="mb-6" /> Syncing Digital Brain...</div> : renderPage()}
+        {!user ? <div className="h-[80vh] flex flex-col items-center justify-center text-cyan-500 animate-pulse uppercase tracking-[0.5em] font-black"><Cpu size={48} className="mb-6" /> Connecting...</div> : renderPage()}
       </main>
 
       <footer className="py-20 px-8 border-t border-white/5 bg-black/40">
         <div className="max-w-7xl mx-auto flex flex-col md:flex-row justify-between items-center gap-12">
           <div className="flex flex-col gap-2 text-left">
             <div className="text-slate-500 text-xs tracking-widest uppercase font-black">© 2024 o9 SOLUTIONS INC.</div>
-            <div className="text-slate-700 text-[10px] font-bold uppercase tracking-widest">Confidential & Proprietary • Town Square Prototype</div>
+            <div className="text-slate-700 text-[10px] font-bold uppercase tracking-widest">Confidential Prototype</div>
           </div>
           <button onClick={() => setSandboxMode(!sandboxMode)} className={`flex items-center gap-2 px-4 py-2 rounded-full border transition-all text-[10px] font-black uppercase ${sandboxMode ? 'bg-orange-500/20 text-orange-400 border-orange-500/50' : 'bg-white/5 text-slate-500 border-white/5'}`}>
             <Database size={14} /> {sandboxMode ? 'Admin Portal Active' : 'Enter Admin Sandbox'}
