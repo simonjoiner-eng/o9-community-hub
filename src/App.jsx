@@ -9,27 +9,47 @@ import { getAuth, onAuthStateChanged, signInWithCustomToken, signInAnonymously }
 import { getFirestore, doc, setDoc, getDoc, collection, onSnapshot, updateDoc, deleteDoc, increment, addDoc } from 'firebase/firestore';
 
 // --- Production Configuration ---
-// We use a safe check for environment variables to prevent compilation errors in older target environments.
+// Refined helper to safely access environment variables without breaking ES2015 targets
 const getFirebaseConfig = () => {
-  if (typeof __firebase_config !== 'undefined') {
+  // 1. Safe check for Vite/Netlify Environment Variables
+  try {
+    if (typeof import.meta !== 'undefined' && import.meta.env?.VITE_FIREBASE_CONFIG) {
+      return JSON.parse(import.meta.env.VITE_FIREBASE_CONFIG);
+    }
+  } catch (e) {
+    // Fallback if import.meta is restricted or undefined
+  }
+
+  // 2. Fallback for internal previewer tool
+  if (typeof __firebase_config !== 'undefined' && __firebase_config) {
     return JSON.parse(__firebase_config);
   }
-  // Fallback for local development or Netlify environments where global variables aren't injected by the previewer
-  return {}; 
+  return null; 
 };
 
 const getAppId = () => {
-  if (typeof __app_id !== 'undefined') {
-    return __app_id;
+  try {
+    if (typeof import.meta !== 'undefined' && import.meta.env?.VITE_APP_ID) {
+      return import.meta.env.VITE_APP_ID;
+    }
+  } catch (e) {
+    // Fallback if import.meta is restricted
   }
+  
+  if (typeof __app_id !== 'undefined') return __app_id;
   return 'community-hub-default';
 };
 
 const firebaseConfig = getFirebaseConfig();
-const app = initializeApp(firebaseConfig);
-const auth = getAuth(app);
-const db = getFirestore(app);
 const appId = getAppId();
+
+// Initialize Firebase only if config exists to prevent blank-page crashes
+let app, auth, db;
+if (firebaseConfig) {
+  app = initializeApp(firebaseConfig);
+  auth = getAuth(app);
+  db = getFirestore(app);
+}
 
 // --- Constants ---
 const SOLUTION_AREAS = [
@@ -409,18 +429,19 @@ export default function App() {
 
   useEffect(() => {
     const initAuth = async () => {
+      if (!auth) return; // Guard for missing config
       try {
         if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) await signInWithCustomToken(auth, __initial_auth_token);
         else await signInAnonymously(auth);
-      } catch (err) { console.error(err); }
+      } catch (err) { console.error("Auth init failed:", err); }
     };
     initAuth();
-    const unsubscribe = onAuthStateChanged(auth, setUser);
+    const unsubscribe = auth ? onAuthStateChanged(auth, setUser) : () => {};
     return () => unsubscribe();
   }, []);
 
   useEffect(() => {
-    if (!user) return;
+    if (!user || !db) return;
     
     // Sync Ideas
     const ideasCol = collection(db, 'artifacts', appId, 'public', 'data', 'votes');
@@ -466,6 +487,17 @@ export default function App() {
     { id: 'members', label: 'Experts', icon: Users },
     { id: 'links', label: 'Assets', icon: BookOpen },
   ];
+
+  // Failure guard UI if config is missing
+  if (!firebaseConfig) {
+    return (
+      <div className="min-h-screen bg-[#020617] text-white flex flex-col items-center justify-center p-10 text-center">
+        <Database size={64} className="text-red-400 mb-6" />
+        <h1 className="text-3xl font-black mb-4">Configuration Missing</h1>
+        <p className="text-slate-400 max-w-md">The platform cannot reach the Digital Brain. Please ensure <strong>VITE_FIREBASE_CONFIG</strong> is set in your Netlify Environment Variables.</p>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-[#020617] text-slate-100 font-sans selection:bg-cyan-500/30 selection:text-cyan-400">
